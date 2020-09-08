@@ -126,7 +126,7 @@ func (rt *Runtime) shimCall(f func() interface{}) (rval []byte, aerr aerrors.Act
 	ret := f()
 
 	if !rt.callerValidated {
-		rt.Abortf(exitcode.SysErrorIllegalActor, "Caller MUST be validated during method execution")
+		abortf(exitcode.SysErrorIllegalActor, "Caller MUST be validated during method execution")
 	}
 
 	switch ret := ret.(type) {
@@ -159,7 +159,7 @@ func (rt *Runtime) ValidateImmediateCallerAcceptAny() {
 func (rt *Runtime) CurrentBalance() abi.TokenAmount {
 	b, err := rt.GetBalance(rt.Message().Receiver())
 	if err != nil {
-		rt.Abortf(err.RetCode(), "get current balance: %v", err)
+		abortf(err.RetCode(), "get current balance: %v", err)
 	}
 	return b
 }
@@ -221,16 +221,16 @@ func (rt *Runtime) NewActorAddress() address.Address {
 
 func (rt *Runtime) CreateActor(codeID cid.Cid, address address.Address) {
 	if !builtin.IsBuiltinActor(codeID) {
-		rt.Abortf(exitcode.SysErrorIllegalArgument, "Can only create built-in actors.")
+		abortf(exitcode.SysErrorIllegalArgument, "Can only create built-in actors.")
 	}
 
 	if builtin.IsSingletonActor(codeID) {
-		rt.Abortf(exitcode.SysErrorIllegalArgument, "Can only have one instance of singleton actors.")
+		abortf(exitcode.SysErrorIllegalArgument, "Can only have one instance of singleton actors.")
 	}
 
 	_, err := rt.state.GetActor(address)
 	if err == nil {
-		rt.Abortf(exitcode.SysErrorIllegalArgument, "Actor address already exists")
+		abortf(exitcode.SysErrorIllegalArgument, "Actor address already exists")
 	}
 
 	rt.chargeGas(rt.Pricelist().OnCreateActor())
@@ -256,7 +256,7 @@ func (rt *Runtime) DeleteActor(beneficiary address.Address) {
 	act, err := rt.state.GetActor(rt.Message().Receiver())
 	if err != nil {
 		if xerrors.Is(err, types.ErrActorNotFound) {
-			rt.Abortf(exitcode.SysErrorIllegalActor, "failed to load actor in delete actor: %s", err)
+			abortf(exitcode.SysErrorIllegalActor, "failed to load actor in delete actor: %s", err)
 		}
 		panic(aerrors.Fatalf("failed to get actor: %s", err))
 	}
@@ -291,15 +291,27 @@ func (rt *Runtime) ValidateImmediateCallerIs(as ...address.Address) {
 			return
 		}
 	}
-	rt.Abortf(exitcode.SysErrForbidden, "caller %s is not one of %s", rt.Message().Caller(), as)
+	abortf(exitcode.SysErrForbidden, "caller %s is not one of %s", rt.Message().Caller(), as)
 }
 
 func (rt *Runtime) Context() context.Context {
 	return rt.ctx
 }
 
+// Abortf should be called by ACTORS to abort execution with the given non-system
+// and non-negative exit code.
 func (rt *Runtime) Abortf(code exitcode.ExitCode, msg string, args ...interface{}) {
 	log.Warnf("Abortf: " + fmt.Sprintf(msg, args...))
+	if code < exitcode.FirstActorErrorCode {
+		panic(aerrors.NewfSkip(2, exitcode.SysErrorIllegalActor, "Actor used illegal exit code: %s", code))
+	}
+	panic(aerrors.NewfSkip(2, code, msg, args...))
+}
+
+// abortf should be called by the runtime/vm to abort execution with ANY exit
+// code, including system codes.
+func abortf(code exitcode.ExitCode, msg string, args ...interface{}) {
+	log.Warnf("abortf: " + fmt.Sprintf(msg, args...))
 	panic(aerrors.NewfSkip(2, code, msg, args...))
 }
 
@@ -318,7 +330,7 @@ func (rt *Runtime) ValidateImmediateCallerType(ts ...cid.Cid) {
 			return
 		}
 	}
-	rt.Abortf(exitcode.SysErrForbidden, "caller cid type %q was not one of %v", callerCid, ts)
+	abortf(exitcode.SysErrForbidden, "caller cid type %q was not one of %v", callerCid, ts)
 }
 
 func (rt *Runtime) CurrEpoch() abi.ChainEpoch {
@@ -335,13 +347,13 @@ func (dwt *dumbWrapperType) Into(um vmr.CBORUnmarshaler) error {
 
 func (rt *Runtime) Send(to address.Address, method abi.MethodNum, m vmr.CBORMarshaler, value abi.TokenAmount) (vmr.SendReturn, exitcode.ExitCode) {
 	if !rt.allowInternal {
-		rt.Abortf(exitcode.SysErrorIllegalActor, "runtime.Send() is currently disallowed")
+		abortf(exitcode.SysErrorIllegalActor, "runtime.Send() is currently disallowed")
 	}
 	var params []byte
 	if m != nil {
 		buf := new(bytes.Buffer)
 		if err := m.MarshalCBOR(buf); err != nil {
-			rt.Abortf(exitcode.SysErrInvalidParameters, "failed to marshal input parameters: %s", err)
+			abortf(exitcode.SysErrInvalidParameters, "failed to marshal input parameters: %s", err)
 		}
 		params = buf.Bytes()
 	}
@@ -418,19 +430,19 @@ func (ssh *shimStateHandle) Create(obj vmr.CBORMarshaler) {
 func (ssh *shimStateHandle) Readonly(obj vmr.CBORUnmarshaler) {
 	act, err := ssh.rt.state.GetActor(ssh.rt.Message().Receiver())
 	if err != nil {
-		ssh.rt.Abortf(exitcode.SysErrorIllegalArgument, "failed to get actor for Readonly state: %s", err)
+		abortf(exitcode.SysErrorIllegalArgument, "failed to get actor for Readonly state: %s", err)
 	}
 	ssh.rt.Get(act.Head, obj)
 }
 
 func (ssh *shimStateHandle) Transaction(obj vmr.CBORer, f func()) {
 	if obj == nil {
-		ssh.rt.Abortf(exitcode.SysErrorIllegalActor, "Must not pass nil to Transaction()")
+		abortf(exitcode.SysErrorIllegalActor, "Must not pass nil to Transaction()")
 	}
 
 	act, err := ssh.rt.state.GetActor(ssh.rt.Message().Receiver())
 	if err != nil {
-		ssh.rt.Abortf(exitcode.SysErrorIllegalActor, "failed to get actor for Transaction: %s", err)
+		abortf(exitcode.SysErrorIllegalActor, "failed to get actor for Transaction: %s", err)
 	}
 	baseState := act.Head
 	ssh.rt.Get(baseState, obj)
@@ -562,7 +574,7 @@ func (rt *Runtime) incrementNumActorsCreated() {
 
 func (rt *Runtime) abortIfAlreadyValidated() {
 	if rt.callerValidated {
-		rt.Abortf(exitcode.SysErrorIllegalActor, "Method must validate caller identity exactly once")
+		abortf(exitcode.SysErrorIllegalActor, "Method must validate caller identity exactly once")
 	}
 	rt.callerValidated = true
 }
