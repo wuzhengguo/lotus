@@ -333,6 +333,7 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 		return nil, err
 	}
 
+	// Generate proofs in batches
 	posts := make([]miner.SubmitWindowedPoStParams, 0, len(partitionBatches))
 	for batchIdx, batch := range partitionBatches {
 		batchPartitionStartIdx := 0
@@ -346,18 +347,12 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 			Proofs:     nil,
 		}
 
-		//var sinfos []proof.SectorInfo
-		//sidToPart := map[abi.SectorNumber]uint64{}
-		//skipCount := uint64(0)
-
 		skipCount := uint64(0)
 		postSkipped := bitfield.New()
 		var postOut []proof.PoStProof
-		var sinfos []proof.SectorInfo
-
+		somethingToProve := true
 		for retries := 0; retries < 5; retries++ {
-			sinfos = make([]proof.SectorInfo, 0)
-
+			var sinfos []proof.SectorInfo
 			for partIdx, partition := range batch {
 				// TODO: Can do this in parallel
 				toProve, err := partition.ActiveSectors()
@@ -409,11 +404,12 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 			}
 
 			if len(sinfos) == 0 {
-				// nothing to prove..
-				//return nil, errNoPartitions
+				// nothing to prove for this batch
+				somethingToProve = false
 				break
 			}
 
+			// Generate proof
 			log.Infow("running windowPost",
 				"chain-random", rand,
 				"deadline", di,
@@ -434,8 +430,11 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 			log.Infow("computing window PoSt", "batch", batchIdx, "elapsed", elapsed)
 
 			if err == nil {
+				// Proof generation successful, stop retrying
 				break
 			}
+
+			// Proof generation failed, so retry
 
 			if len(ps) == 0 {
 				return nil, xerrors.Errorf("running post failed: %w", err)
@@ -449,7 +448,8 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 			}
 		}
 
-		if len(sinfos) == 0 {
+		// Nothing to prove for this batch, try the next batch
+		if !somethingToProve {
 			continue
 		}
 
@@ -462,10 +462,12 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 		posts = append(posts, params)
 	}
 
+	// Compute randomness after generating proofs so as to reduce the impact
+	// of chain reorgs (which change randomness)
 	commEpoch := di.Open
 	commRand, err := s.api.ChainGetRandomnessFromTickets(ctx, ts.Key(), crypto.DomainSeparationTag_PoStChainCommit, commEpoch, nil)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to get chain randomness for windowPost (ts=%d; deadline=%d): %w", ts.Height(), di, err)
+		return nil, xerrors.Errorf("failed to get chain randomness for windowPost (ts=%d; deadline=%d): %w", ts.Height(), commEpoch, err)
 	}
 
 	for i := range posts {
