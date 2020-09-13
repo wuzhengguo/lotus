@@ -2,6 +2,7 @@ package sectorstorage
 
 import (
 	"context"
+	"github.com/filecoin-project/go-statestore"
 	"io"
 	"os"
 	"runtime"
@@ -36,10 +37,11 @@ type LocalWorker struct {
 	sindex     stores.SectorIndex
 	ret        storiface.WorkerReturn
 
+	ct *callTracker
 	acceptTasks map[sealtasks.TaskType]struct{}
 }
 
-func NewLocalWorker(wcfg WorkerConfig, store stores.Store, local *stores.Local, sindex stores.SectorIndex, ret storiface.WorkerReturn) *LocalWorker {
+func NewLocalWorker(wcfg WorkerConfig, store stores.Store, local *stores.Local, sindex stores.SectorIndex, ret storiface.WorkerReturn, cst *statestore.StateStore) *LocalWorker {
 	acceptTasks := map[sealtasks.TaskType]struct{}{}
 	for _, taskType := range wcfg.TaskTypes {
 		acceptTasks[taskType] = struct{}{}
@@ -54,6 +56,9 @@ func NewLocalWorker(wcfg WorkerConfig, store stores.Store, local *stores.Local, 
 		sindex:     sindex,
 		ret:        ret,
 
+		ct: &callTracker{
+			st: cst,
+		},
 		acceptTasks: acceptTasks,
 	}
 }
@@ -98,10 +103,26 @@ func (l *LocalWorker) sb() (ffiwrapper.Storage, error) {
 	return ffiwrapper.New(&localWorkerPathProvider{w: l}, l.scfg)
 }
 
-func (l *LocalWorker) asyncCall(sector abi.SectorID, work func(ci storiface.CallID)) (storiface.CallID, error) {
+type returnType string
+
+// in: func(WorkerReturn, context.Context, CallID, err string)
+// in: func(WorkerReturn, context.Context, CallID, ret T, err string)
+func rfunc(in interface{}) func(interface{})error {
+	panic("ZAIMPLEMENTUJ MIE")
+}
+
+var returnFunc = map[returnType]func(interface{})error{
+	"AddPiece": rfunc(storiface.WorkerReturn.ReturnAddPiece),
+}
+
+func (l *LocalWorker) asyncCall(sector abi.SectorID, rt returnType, work func(ci storiface.CallID, ret func(data []byte))) (storiface.CallID, error) {
 	ci := storiface.CallID{
 		Sector: sector,
 		ID:     uuid.New(),
+	}
+
+	if err := l.ct.onStart(ci); err != nil {
+		log.Errorf("tracking call (start): %+v", err)
 	}
 
 	go work(ci)
