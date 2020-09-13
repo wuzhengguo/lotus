@@ -353,6 +353,8 @@ type FullNode interface {
 	StateSectorPartition(ctx context.Context, maddr address.Address, sectorNumber abi.SectorNumber, tok types.TipSetKey) (*SectorLocation, error)
 	// StateSearchMsg searches for a message in the chain, and returns its receipt and the tipset where it was executed
 	StateSearchMsg(context.Context, cid.Cid) (*MsgLookup, error)
+	// StateMsgGasCost searches for a message in the chain, and returns details of the messages gas costs, including the penalty and miner tip
+	StateMsgGasCost(context.Context, cid.Cid) (*MsgGasCost, error)
 	// StateWaitMsg looks back in the chain for a message. If not found, it blocks until the
 	// message arrives on chain, and gets to the indicated confidence depth.
 	StateWaitMsg(ctx context.Context, cid cid.Cid, confidence uint64) (*MsgLookup, error)
@@ -528,6 +530,16 @@ type MsgLookup struct {
 	ReturnDec interface{}
 	TipSet    types.TipSetKey
 	Height    abi.ChainEpoch
+}
+
+type MsgGasCost struct {
+	Message            cid.Cid // Can be different than requested, in case it was replaced, but only gas values changed
+	Receipt            types.MessageReceipt
+	BaseFeeBurn        abi.TokenAmount
+	OverEstimationBurn abi.TokenAmount
+	MinerPenalty       abi.TokenAmount
+	MinerTip           abi.TokenAmount
+	Refund             abi.TokenAmount
 }
 
 type BlockMessages struct {

@@ -1226,3 +1226,30 @@ func (a *StateAPI) StateCirculatingSupply(ctx context.Context, tsk types.TipSetK
 
 	return a.StateManager.GetCirculatingSupplyDetailed(ctx, ts.Height(), sTree)
 }
+
+func (a *StateAPI) StateMsgGasCost(ctx context.Context, msg cid.Cid) (*api.MsgGasCost, error) {
+	ml, err := a.StateSearchMsg(ctx, msg)
+	if err != nil {
+		return nil, xerrors.Errorf("searching for msg %s: %w", msg, err)
+	}
+
+	mts, err := a.Chain.GetTipSetFromKey(ml.TipSet)
+	if err != nil {
+		return nil, xerrors.Errorf("loading tipset %s: %w", ml.TipSet, err)
+	}
+
+	_, r, err := a.StateManager.Replay(ctx, mts, ml.Message)
+	if err != nil {
+		return nil, err
+	}
+
+	return &api.MsgGasCost{
+		Message:            ml.Message,
+		Receipt:            r.MessageReceipt,
+		BaseFeeBurn:        r.GasCosts.BaseFeeBurn,
+		OverEstimationBurn: r.GasCosts.OverEstimationBurn,
+		MinerPenalty:       r.GasCosts.MinerPenalty,
+		MinerTip:           r.GasCosts.MinerTip,
+		Refund:             r.GasCosts.Refund,
+	}, nil
+}
