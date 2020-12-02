@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"math/big"
 
+	proof2 "github.com/filecoin-project/specs-actors/v2/actors/runtime/proof"
+
 	"github.com/minio/blake2b-simd"
 
-	"github.com/filecoin-project/specs-actors/actors/abi"
-	"github.com/filecoin-project/specs-actors/actors/crypto"
+	"github.com/filecoin-project/go-state-types/abi"
+	"github.com/filecoin-project/go-state-types/crypto"
 
 	block "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
@@ -53,7 +55,7 @@ type BlockHeader struct {
 
 	BeaconEntries []BeaconEntry // 3
 
-	WinPoStProof []abi.PoStProof // 4
+	WinPoStProof []proof2.PoStProof // 4
 
 	Parents []cid.Cid // 5
 

@@ -19,8 +19,8 @@ import (
 	"golang.org/x/xerrors"
 
 	"github.com/filecoin-project/go-jsonrpc"
+	"github.com/filecoin-project/go-state-types/abi"
 	sealing "github.com/filecoin-project/lotus/extern/storage-sealing"
-	"github.com/filecoin-project/specs-actors/actors/abi"
 )
 
 var log = logging.Logger("rpcenc")
@@ -64,7 +64,7 @@ func ReaderParamEncoder(addr string) jsonrpc.Option {
 				return
 			}
 
-			defer resp.Body.Close()
+			defer resp.Body.Close() //nolint:errcheck
 
 			if resp.StatusCode != 200 {
 				b, _ := ioutil.ReadAll(resp.Body)

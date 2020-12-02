@@ -8,19 +8,22 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/filecoin-project/specs-actors/actors/abi/big"
+	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
+	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/peer"
 	"golang.org/x/xerrors"
 
 	"github.com/filecoin-project/go-address"
+	datatransfer "github.com/filecoin-project/go-data-transfer"
 	"github.com/filecoin-project/go-fil-markets/piecestore"
 	retrievalmarket "github.com/filecoin-project/go-fil-markets/retrievalmarket"
 	storagemarket "github.com/filecoin-project/go-fil-markets/storagemarket"
 	"github.com/filecoin-project/go-jsonrpc/auth"
-	"github.com/filecoin-project/specs-actors/actors/abi"
+	"github.com/filecoin-project/go-state-types/abi"
+	"github.com/filecoin-project/go-state-types/big"
 
 	sectorstorage "github.com/filecoin-project/lotus/extern/sector-storage"
-	"github.com/filecoin-project/lotus/extern/sector-storage/ffiwrapper"
 	"github.com/filecoin-project/lotus/extern/sector-storage/fsutil"
 	"github.com/filecoin-project/lotus/extern/sector-storage/stores"
 	"github.com/filecoin-project/lotus/extern/sector-storage/storiface"
@@ -39,7 +42,6 @@ import (
 type StorageMinerAPI struct {
 	common.CommonAPI
 
-	ProofsConfig *ffiwrapper.Config
 	SectorBlocks *sectorblocks.SectorBlocks
 
 	PieceStore        dtypes.ProviderPieceStore
@@ -51,6 +53,11 @@ type StorageMinerAPI struct {
 	StorageMgr        *sectorstorage.Manager `optional:"true"`
 	IStorageMgr       sectorstorage.SectorManager
 	*stores.Index
+	storiface.WorkerReturn
+	DataTransfer dtypes.ProviderDataTransfer
+	Host         host.Host
+
+	DS dtypes.MetadataDS
 
 	ConsiderOnlineStorageDealsConfigFunc       dtypes.ConsiderOnlineStorageDealsConfigFunc
 	SetConsiderOnlineStorageDealsConfigFunc    dtypes.SetConsiderOnlineStorageDealsConfigFunc
@@ -78,11 +85,11 @@ func (sm *StorageMinerAPI) ServeRemote(w http.ResponseWriter, r *http.Request) {
 	sm.StorageMgr.ServeHTTP(w, r)
 }
 
-func (sm *StorageMinerAPI) WorkerStats(context.Context) (map[uint64]storiface.WorkerStats, error) {
+func (sm *StorageMinerAPI) WorkerStats(context.Context) (map[uuid.UUID]storiface.WorkerStats, error) {
 	return sm.StorageMgr.WorkerStats(), nil
 }
 
-func (sm *StorageMinerAPI) WorkerJobs(ctx context.Context) (map[uint64][]storiface.WorkerJob, error) {
+func (sm *StorageMinerAPI) WorkerJobs(ctx context.Context) (map[uuid.UUID][]storiface.WorkerJob, error) {
 	return sm.StorageMgr.WorkerJobs(), nil
 }
 
@@ -149,7 +156,10 @@ func (sm *StorageMinerAPI) SectorsStatus(ctx context.Context, sid abi.SectorNumb
 			Value: info.SeedValue,
 			Epoch: info.SeedEpoch,
 		},
-		Retries: info.InvalidProofs,
+		PreCommitMsg: info.PreCommitMessage,
+		CommitMsg:    info.CommitMessage,
+		Retries:      info.InvalidProofs,
+		ToUpgrade:    sm.Miner.IsMarkedForUpgrade(sid),
 
 		LastErr: info.LastErr,
 		Log:     log,
@@ -170,6 +180,9 @@ func (sm *StorageMinerAPI) SectorsStatus(ctx context.Context, sid abi.SectorNumb
 
 	onChainInfo, err := sm.Full.StateSectorGetInfo(ctx, sm.Miner.Address(), sid, types.EmptyTSK)
 	if err != nil {
+		return sInfo, err
+	}
+	if onChainInfo == nil {
 		return sInfo, nil
 	}
 	sInfo.SealProof = onChainInfo.SealProof
@@ -281,8 +294,12 @@ func (sm *StorageMinerAPI) WorkerConnect(ctx context.Context, url string) error 
 	return sm.StorageMgr.AddWorker(ctx, w)
 }
 
-func (sm *StorageMinerAPI) SealingSchedDiag(ctx context.Context) (interface{}, error) {
-	return sm.StorageMgr.SchedDiag(ctx)
+func (sm *StorageMinerAPI) SealingSchedDiag(ctx context.Context, doSched bool) (interface{}, error) {
+	return sm.StorageMgr.SchedDiag(ctx, doSched)
+}
+
+func (sm *StorageMinerAPI) SealingAbort(ctx context.Context, call storiface.CallID) error {
+	return sm.StorageMgr.Abort(ctx, call)
 }
 
 func (sm *StorageMinerAPI) MarketImportDealData(ctx context.Context, propCid cid.Cid, path string) error {
@@ -295,8 +312,30 @@ func (sm *StorageMinerAPI) MarketImportDealData(ctx context.Context, propCid cid
 	return sm.StorageProvider.ImportDataForDeal(ctx, propCid, fi)
 }
 
-func (sm *StorageMinerAPI) MarketListDeals(ctx context.Context) ([]storagemarket.StorageDeal, error) {
-	return sm.StorageProvider.ListDeals(ctx)
+func (sm *StorageMinerAPI) listDeals(ctx context.Context) ([]api.MarketDeal, error) {
+	ts, err := sm.Full.ChainHead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tsk := ts.Key()
+	allDeals, err := sm.Full.StateMarketDeals(ctx, tsk)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []api.MarketDeal
+
+	for _, deal := range allDeals {
+		if deal.Proposal.Provider == sm.Miner.Address() {
+			out = append(out, deal)
+		}
+	}
+
+	return out, nil
+}
+
+func (sm *StorageMinerAPI) MarketListDeals(ctx context.Context) ([]api.MarketDeal, error) {
+	return sm.listDeals(ctx)
 }
 
 func (sm *StorageMinerAPI) MarketListRetrievalDeals(ctx context.Context) ([]retrievalmarket.ProviderDealState, error) {
@@ -310,14 +349,12 @@ func (sm *StorageMinerAPI) MarketListRetrievalDeals(ctx context.Context) ([]retr
 	return out, nil
 }
 
-func (sm *StorageMinerAPI) MarketGetDealUpdates(ctx context.Context, d cid.Cid) (<-chan storagemarket.MinerDeal, error) {
+func (sm *StorageMinerAPI) MarketGetDealUpdates(ctx context.Context) (<-chan storagemarket.MinerDeal, error) {
 	results := make(chan storagemarket.MinerDeal)
 	unsub := sm.StorageProvider.SubscribeToEvents(func(evt storagemarket.ProviderEvent, deal storagemarket.MinerDeal) {
-		if deal.ProposalCid.Equals(d) {
-			select {
-			case results <- deal:
-			case <-ctx.Done():
-			}
+		select {
+		case results <- deal:
+		case <-ctx.Done():
 		}
 	})
 	go func() {
@@ -354,8 +391,57 @@ func (sm *StorageMinerAPI) MarketGetRetrievalAsk(ctx context.Context) (*retrieva
 	return sm.RetrievalProvider.GetAsk(), nil
 }
 
-func (sm *StorageMinerAPI) DealsList(ctx context.Context) ([]storagemarket.StorageDeal, error) {
-	return sm.StorageProvider.ListDeals(ctx)
+func (sm *StorageMinerAPI) MarketListDataTransfers(ctx context.Context) ([]api.DataTransferChannel, error) {
+	inProgressChannels, err := sm.DataTransfer.InProgressChannels(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	apiChannels := make([]api.DataTransferChannel, 0, len(inProgressChannels))
+	for _, channelState := range inProgressChannels {
+		apiChannels = append(apiChannels, api.NewDataTransferChannel(sm.Host.ID(), channelState))
+	}
+
+	return apiChannels, nil
+}
+
+func (sm *StorageMinerAPI) MarketRestartDataTransfer(ctx context.Context, transferID datatransfer.TransferID, otherPeer peer.ID, isInitiator bool) error {
+	selfPeer := sm.Host.ID()
+	if isInitiator {
+		return sm.DataTransfer.RestartDataTransferChannel(ctx, datatransfer.ChannelID{Initiator: selfPeer, Responder: otherPeer, ID: transferID})
+	}
+	return sm.DataTransfer.RestartDataTransferChannel(ctx, datatransfer.ChannelID{Initiator: otherPeer, Responder: selfPeer, ID: transferID})
+}
+
+func (sm *StorageMinerAPI) MarketCancelDataTransfer(ctx context.Context, transferID datatransfer.TransferID, otherPeer peer.ID, isInitiator bool) error {
+	selfPeer := sm.Host.ID()
+	if isInitiator {
+		return sm.DataTransfer.CloseDataTransferChannel(ctx, datatransfer.ChannelID{Initiator: selfPeer, Responder: otherPeer, ID: transferID})
+	}
+	return sm.DataTransfer.CloseDataTransferChannel(ctx, datatransfer.ChannelID{Initiator: otherPeer, Responder: selfPeer, ID: transferID})
+}
+
+func (sm *StorageMinerAPI) MarketDataTransferUpdates(ctx context.Context) (<-chan api.DataTransferChannel, error) {
+	channels := make(chan api.DataTransferChannel)
+
+	unsub := sm.DataTransfer.SubscribeToEvents(func(evt datatransfer.Event, channelState datatransfer.ChannelState) {
+		channel := api.NewDataTransferChannel(sm.Host.ID(), channelState)
+		select {
+		case <-ctx.Done():
+		case channels <- channel:
+		}
+	})
+
+	go func() {
+		defer unsub()
+		<-ctx.Done()
+	}()
+
+	return channels, nil
+}
+
+func (sm *StorageMinerAPI) DealsList(ctx context.Context) ([]api.MarketDeal, error) {
+	return sm.listDeals(ctx)
 }
 
 func (sm *StorageMinerAPI) RetrievalDealsList(ctx context.Context) (map[retrievalmarket.ProviderDealIdentifier]retrievalmarket.ProviderDealState, error) {
@@ -451,6 +537,10 @@ func (sm *StorageMinerAPI) PiecesGetCIDInfo(ctx context.Context, payloadCid cid.
 	}
 
 	return &ci, nil
+}
+
+func (sm *StorageMinerAPI) CreateBackup(ctx context.Context, fpath string) error {
+	return backup(sm.DS, fpath)
 }
 
 var _ api.StorageMiner = &StorageMinerAPI{}

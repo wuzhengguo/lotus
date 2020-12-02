@@ -4,18 +4,19 @@ import (
 	"context"
 	"sync"
 
+	"github.com/filecoin-project/lotus/paychmgr"
+
 	"go.uber.org/fx"
 
 	"github.com/ipfs/go-cid"
 	logging "github.com/ipfs/go-log/v2"
 
 	"github.com/filecoin-project/go-address"
-	"github.com/filecoin-project/specs-actors/actors/abi"
-	"github.com/filecoin-project/specs-actors/actors/builtin"
-	"github.com/filecoin-project/specs-actors/actors/builtin/paych"
+	"github.com/filecoin-project/go-state-types/abi"
 
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/build"
+	"github.com/filecoin-project/lotus/chain/actors/builtin/paych"
 	"github.com/filecoin-project/lotus/chain/events"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/node/impl/full"
@@ -38,7 +39,7 @@ type settlerAPI interface {
 	PaychStatus(context.Context, address.Address) (*api.PaychStatus, error)
 	PaychVoucherCheckSpendable(context.Context, address.Address, *paych.SignedVoucher, []byte, []byte) (bool, error)
 	PaychVoucherList(context.Context, address.Address) ([]*paych.SignedVoucher, error)
-	PaychVoucherSubmit(context.Context, address.Address, *paych.SignedVoucher) (cid.Cid, error)
+	PaychVoucherSubmit(context.Context, address.Address, *paych.SignedVoucher, []byte, []byte) (cid.Cid, error)
 	StateWaitMsg(ctx context.Context, cid cid.Cid, confidence uint64) (*api.MsgLookup, error)
 }
 
@@ -72,27 +73,14 @@ func (pcs *paymentChannelSettler) check(ts *types.TipSet) (done bool, more bool,
 }
 
 func (pcs *paymentChannelSettler) messageHandler(msg *types.Message, rec *types.MessageReceipt, ts *types.TipSet, curH abi.ChainEpoch) (more bool, err error) {
-	vouchers, err := pcs.api.PaychVoucherList(pcs.ctx, msg.To)
+	bestByLane, err := paychmgr.BestSpendableByLane(pcs.ctx, pcs.api, msg.To)
 	if err != nil {
 		return true, err
-	}
-
-	bestByLane := make(map[uint64]*paych.SignedVoucher)
-	for _, voucher := range vouchers {
-		spendable, err := pcs.api.PaychVoucherCheckSpendable(pcs.ctx, msg.To, voucher, nil, nil)
-		if err != nil {
-			return true, err
-		}
-		if spendable {
-			if bestByLane[voucher.Lane] == nil || voucher.Amount.GreaterThan(bestByLane[voucher.Lane].Amount) {
-				bestByLane[voucher.Lane] = voucher
-			}
-		}
 	}
 	var wg sync.WaitGroup
 	wg.Add(len(bestByLane))
 	for _, voucher := range bestByLane {
-		submitMessageCID, err := pcs.api.PaychVoucherSubmit(pcs.ctx, msg.To, voucher)
+		submitMessageCID, err := pcs.api.PaychVoucherSubmit(pcs.ctx, msg.To, voucher, nil, nil)
 		if err != nil {
 			return true, err
 		}
@@ -115,27 +103,27 @@ func (pcs *paymentChannelSettler) revertHandler(ctx context.Context, ts *types.T
 	return nil
 }
 
-func (pcs *paymentChannelSettler) matcher(msg *types.Message) (matchOnce bool, matched bool, err error) {
+func (pcs *paymentChannelSettler) matcher(msg *types.Message) (matched bool, err error) {
 	// Check if this is a settle payment channel message
-	if msg.Method != builtin.MethodsPaych.Settle {
-		return false, false, nil
+	if msg.Method != paych.Methods.Settle {
+		return false, nil
 	}
 	// Check if this payment channel is of concern to this node (i.e. tracked in payment channel store),
 	// and its inbound (i.e. we're getting vouchers that we may need to redeem)
 	trackedAddresses, err := pcs.api.PaychList(pcs.ctx)
 	if err != nil {
-		return false, false, err
+		return false, err
 	}
 	for _, addr := range trackedAddresses {
 		if msg.To == addr {
 			status, err := pcs.api.PaychStatus(pcs.ctx, addr)
 			if err != nil {
-				return false, false, err
+				return false, err
 			}
 			if status.Direction == api.PCHInbound {
-				return false, true, nil
+				return true, nil
 			}
 		}
 	}
-	return false, false, nil
+	return false, nil
 }

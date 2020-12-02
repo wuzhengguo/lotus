@@ -7,8 +7,9 @@ import (
 	"github.com/ipfs/go-cid"
 
 	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
 	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	"github.com/filecoin-project/specs-actors/actors/abi"
+	"github.com/filecoin-project/go-state-types/abi"
 
 	"github.com/filecoin-project/lotus/extern/storage-sealing/sealiface"
 )
@@ -71,4 +72,5 @@ type SetExpectedSealDurationFunc func(time.Duration) error
 // too determine how long sealing is expected to take
 type GetExpectedSealDurationFunc func() (time.Duration, error)
 
-type DealFilter func(ctx context.Context, deal storagemarket.MinerDeal) (bool, string, error)
+type StorageDealFilter func(ctx context.Context, deal storagemarket.MinerDeal) (bool, string, error)
+type RetrievalDealFilter func(ctx context.Context, deal retrievalmarket.ProviderDealState) (bool, string, error)
